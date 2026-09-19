@@ -25,7 +25,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 
 // ------------------------------------------------------------------ config
 function loadEnvFile(file) {
@@ -86,7 +86,7 @@ async function heartbeat() {
     try {
         await api('POST', '/api/worker/heartbeat', { worker_id: cfg.workerId, status: paused ? 'paused' : currentJob ? 'busy' : 'idle', timestamp: new Date().toISOString(), version: VERSION,
             environment: cfg.environment, current_job: currentJob, current_jobs: currentJob ? [currentJob] : [], capacity: 1, remote_paused: paused,
-            resources: { cpu_load_1m: Math.round(os.loadavg()[0] * 100) / 100, free_ram_gb: Math.round(os.freemem() / 1e9 * 10) / 10, free_disk_gb: freeDiskGb, uptime_seconds: Math.round(os.uptime()), generator: cfg.generator } }, { timeoutMs: 15000 });
+            resources: { cpu_load_1m: Math.round(os.loadavg()[0] * 100) / 100, free_ram_gb: Math.round(os.freemem() / 1e9 * 10) / 10, free_disk_gb: freeDiskGb, uptime_seconds: Math.round(os.uptime()), generator: cfg.generator, work_dir: cfg.workDir, host: os.hostname(), platform: process.platform } }, { timeoutMs: 15000 });
     } catch (e) { log('warn', 'heartbeat failed', { error: e.message }); }
 }
 async function checkControl() {
