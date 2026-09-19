@@ -32,7 +32,7 @@ function loadEnvFile(file) {
     if (!fs.existsSync(file)) return;
     for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
         const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-        if (m && !line.trim().startsWith('#') && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+        if (m && !line.trim().startsWith('#') && process.env[m[1]] === undefined) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '').trim();   // a pasted value often carries a stray space
     }
 }
 loadEnvFile(path.join(HERE, '.env'));
@@ -139,15 +139,27 @@ You are building a **clickable, static website demo** that a software company wi
 - When finished, write \`_brief/DONE.txt\` with a two-line summary of what you built.
 ${isFix ? `\n## This is a FIX pass\nAn automatic check found these problems. Fix exactly these, change nothing else:\n${problems.map(p => `- ${p}`).join('\n')}\n` : ''}`;
 
+// On Windows `claude` is normally a .cmd shim, which Node can only start through the command shell — and the shell gets
+// ONE joined string with no quoting. So no argument may contain a space (the prompt goes in on stdin, never as an
+// argument) and a program path with spaces is quoted here.
+function spawnClaude(args, opts = {}) {
+    const viaShell = process.platform === 'win32' && !/\.exe$/i.test(cfg.claudeBin);
+    const bin = viaShell && /\s/.test(cfg.claudeBin) && !cfg.claudeBin.startsWith('"') ? `"${cfg.claudeBin}"` : cfg.claudeBin;
+    return spawn(bin, args, { ...opts, shell: viaShell, windowsHide: true });
+}
+
+const BUILD_PROMPT = 'Follow the instructions in _brief/INSTRUCTIONS.md exactly. Build the demo now.';
+
 function runClaude(site, timeoutMs) {
     return new Promise((resolve) => {
-        const args = ['-p', 'Follow the instructions in _brief/INSTRUCTIONS.md exactly. Build the demo now.', '--output-format', 'json', '--permission-mode', 'acceptEdits',
+        const args = ['-p', '--output-format', 'json', '--permission-mode', 'acceptEdits',
             '--allowedTools', 'Read,Write,Edit,MultiEdit,Glob,Grep,LS', '--disallowedTools', 'Bash,WebFetch,WebSearch,Task,NotebookEdit', '--max-turns', '80'];
-        if (cfg.claudeModel) args.push('--model', cfg.claudeModel);
+        if (cfg.claudeModel) args.push('--model', cfg.claudeModel.replace(/[^A-Za-z0-9._-]/g, ''));
         const env = { ...process.env }; delete env.ANTHROPIC_API_KEY; delete env.ANTHROPIC_AUTH_TOKEN;      // subscription login only
         env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-        const isCmd = process.platform === 'win32' && !/\.exe$/i.test(cfg.claudeBin);
-        const child = spawn(cfg.claudeBin, args, { cwd: site, env, shell: isCmd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawnClaude(args, { cwd: site, env, stdio: ['pipe', 'pipe', 'pipe'] });
+        child.stdin.on('error', () => { /* claude closed its input early; the exit code tells the story */ });
+        child.stdin.end(BUILD_PROMPT);
         currentChild = child; let out = ''; let errOut = '';
         child.stdout.on('data', d => { out += d; if (out.length > 4e6) out = out.slice(-2e6); });
         child.stderr.on('data', d => { errOut += d; if (errOut.length > 1e6) errOut = errOut.slice(-5e5); });
@@ -282,7 +294,7 @@ async function doctor() {
     try { await fsp.mkdir(cfg.workDir, { recursive: true }); await fsp.writeFile(path.join(cfg.workDir, '.write-test'), 'ok'); await fsp.rm(path.join(cfg.workDir, '.write-test')); say(true, 'work folder is writable', cfg.workDir); } catch (e) { say(false, 'work folder is writable', e.message); }
     try { const c = await api('GET', `/api/worker/${cfg.workerId}/control`, null, { timeoutMs: 15000 }); say(true, 'portal reachable and token accepted', `paused=${!!c.pause}`); } catch (e) { say(false, 'portal reachable and token accepted', e.status === 401 ? 'token rejected (401)' : e.message); }
     if (cfg.generator === 'claude') {
-        const v = await new Promise((res) => { const isCmd = process.platform === 'win32' && !/\.exe$/i.test(cfg.claudeBin); const c = spawn(cfg.claudeBin, ['--version'], { shell: isCmd, windowsHide: true }); let o = ''; c.stdout.on('data', d => o += d); c.on('error', () => res(null)); c.on('close', (code) => res(code === 0 ? o.trim() : null)); });
+        const v = await new Promise((res) => { const c = spawnClaude(['--version'], { stdio: ['ignore', 'pipe', 'pipe'] }); let o = ''; setTimeout(() => { c.kill(); res(null); }, 30000).unref(); c.stdout.on('data', d => o += d); c.on('error', () => res(null)); c.on('close', (code) => res(code === 0 ? o.trim() : null)); });
         say(!!v, 'Claude Code CLI found', v || `"${cfg.claudeBin}" is not on PATH — install Claude Code, then run \`claude\` once and log in`);
         say(!process.env.ANTHROPIC_API_KEY, 'no ANTHROPIC_API_KEY in the environment (builds use the subscription login)', process.env.ANTHROPIC_API_KEY ? 'it is set; the runner removes it for Claude, but remove it from this account to be safe' : '');
     } else say(true, 'generator = stub (template demos, no Claude)');
