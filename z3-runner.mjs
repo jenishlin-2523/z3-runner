@@ -25,7 +25,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 // ------------------------------------------------------------------ config
 function loadEnvFile(file) {
@@ -93,7 +93,7 @@ async function checkControl() {
     try {
         const c = await api('GET', `/api/worker/${cfg.workerId}/control`, null, { timeoutMs: 15000 });
         paused = !!c.pause;
-        if (currentJob && (c.cancel || []).includes(currentJob) && currentChild) { log('info', 'cancel requested', { job: currentJob }); currentChild.__cancelled = true; currentChild.kill(); }
+        if (currentJob && (c.cancel || []).includes(currentJob) && currentChild) { log('info', 'cancel requested', { job: currentJob }); currentChild.__cancelled = true; killTree(currentChild); }
     } catch (e) { /* an outage is never read as "unpause" or "cancel" */ }
 }
 
@@ -148,6 +148,17 @@ function spawnClaude(args, opts = {}) {
     return spawn(bin, args, { ...opts, shell: viaShell, windowsHide: true });
 }
 
+// Stopping a build. On Windows `claude` runs UNDER a command shell, and child.kill() ends only that shell: Claude keeps
+// working, keeps our output pipes open, and the runner stays "busy" on a cancelled or timed-out job. taskkill /T ends
+// the whole tree.
+function killTree(child) {
+    if (!child || child.exitCode !== null) return;
+    if (process.platform === 'win32' && child.pid) {
+        const k = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        k.on('error', () => { try { child.kill(); } catch { /* already gone */ } });
+    } else { try { child.kill(); } catch { /* already gone */ } }
+}
+
 const BUILD_PROMPT = 'Follow the instructions in _brief/INSTRUCTIONS.md exactly. Build the demo now.';
 
 function runClaude(site, timeoutMs) {
@@ -163,7 +174,7 @@ function runClaude(site, timeoutMs) {
         currentChild = child; let out = ''; let errOut = '';
         child.stdout.on('data', d => { out += d; if (out.length > 4e6) out = out.slice(-2e6); });
         child.stderr.on('data', d => { errOut += d; if (errOut.length > 1e6) errOut = errOut.slice(-5e5); });
-        const timer = setTimeout(() => { child.__timedOut = true; child.kill(); }, timeoutMs);
+        const timer = setTimeout(() => { child.__timedOut = true; killTree(child); }, timeoutMs);
         child.on('error', (e) => { clearTimeout(timer); currentChild = null; resolve({ ok: false, reason: `could not start "${cfg.claudeBin}": ${e.message}. Is Claude Code installed and on PATH for this user?` }); });
         child.on('close', (code) => {
             clearTimeout(timer); currentChild = null;
@@ -294,7 +305,7 @@ async function doctor() {
     try { await fsp.mkdir(cfg.workDir, { recursive: true }); await fsp.writeFile(path.join(cfg.workDir, '.write-test'), 'ok'); await fsp.rm(path.join(cfg.workDir, '.write-test')); say(true, 'work folder is writable', cfg.workDir); } catch (e) { say(false, 'work folder is writable', e.message); }
     try { const c = await api('GET', `/api/worker/${cfg.workerId}/control`, null, { timeoutMs: 15000 }); say(true, 'portal reachable and token accepted', `paused=${!!c.pause}`); } catch (e) { say(false, 'portal reachable and token accepted', e.status === 401 ? 'token rejected (401)' : e.message); }
     if (cfg.generator === 'claude') {
-        const v = await new Promise((res) => { const c = spawnClaude(['--version'], { stdio: ['ignore', 'pipe', 'pipe'] }); let o = ''; setTimeout(() => { c.kill(); res(null); }, 30000).unref(); c.stdout.on('data', d => o += d); c.on('error', () => res(null)); c.on('close', (code) => res(code === 0 ? o.trim() : null)); });
+        const v = await new Promise((res) => { const c = spawnClaude(['--version'], { stdio: ['ignore', 'pipe', 'pipe'] }); let o = ''; setTimeout(() => { killTree(c); res(null); }, 30000).unref(); c.stdout.on('data', d => o += d); c.on('error', () => res(null)); c.on('close', (code) => res(code === 0 ? o.trim() : null)); });
         say(!!v, 'Claude Code CLI found', v || `"${cfg.claudeBin}" is not on PATH — install Claude Code, then run \`claude\` once and log in`);
         say(!process.env.ANTHROPIC_API_KEY, 'no ANTHROPIC_API_KEY in the environment (builds use the subscription login)', process.env.ANTHROPIC_API_KEY ? 'it is set; the runner removes it for Claude, but remove it from this account to be safe' : '');
     } else say(true, 'generator = stub (template demos, no Claude)');
@@ -307,7 +318,7 @@ async function main() {
     if (!cfg.backend || !cfg.token) { console.error('BACKEND_URL and WORKER_TOKEN are required (see runner/.env.example).'); process.exit(1); }
     await fsp.mkdir(cfg.workDir, { recursive: true });
     log('info', 'runner starting', { worker_id: cfg.workerId, backend: cfg.backend, generator: cfg.generator, version: VERSION });
-    const stop = () => { stopping = true; if (currentChild) currentChild.kill(); };
+    const stop = () => { stopping = true; if (currentChild) killTree(currentChild); };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     await heartbeat();
     const hb = setInterval(heartbeat, cfg.heartbeatSeconds * 1000);
